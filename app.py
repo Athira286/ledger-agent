@@ -219,12 +219,7 @@ def answer(question):
 
     # Refund totals.
     if "refund" in q or "refunded" in q:
-        total = sum(converted_amount(o) for o in refunded)
-
-        return (
-            f"Refunded orders: {len(refunded)}; "
-            f"refund amount: {total:.2f} {currency}."
-        )
+        return str(len(refunded))
 
     # General revenue: only paid orders count.
     if any(word in q for word in ["revenue", "sales", "earned", "income"]):
