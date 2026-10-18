@@ -276,3 +276,20 @@ def ask(data: Question):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+@app.get("/debug")
+def debug():
+    orders, rates = load_ledger()
+
+    south_june = [
+        o for o in orders
+        if o.get("region", "").lower() == "south"
+        and date_of(o).year == 2026
+        and date_of(o).month == 6
+    ]
+
+    return {
+        "total_orders": len(orders),
+        "sample_order": orders[0] if orders else None,
+        "south_june_count": len(south_june),
+        "south_june_sample": south_june[:3],
+    }
