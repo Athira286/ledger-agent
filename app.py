@@ -222,13 +222,12 @@ def answer(question):
         return str(len(refunded))
 
     # General revenue: only paid orders count.
-    if any(word in q for word in ["revenue", "sales", "earned", "income"]):
+    if any(word in q for word in [
+        "revenue", "sales", "earned", "income"
+    ]):
         total = sum(converted_amount(o) for o in paid)
 
-        return (
-            f"Total revenue: {total:.2f} {currency} "
-            f"from {len(paid)} paid orders."
-        )
+        return f"{total:.2f}"
 
     # Customer-specific summary.
     if customer_match:
