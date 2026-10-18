@@ -19,6 +19,13 @@ class Question(BaseModel):
     question: str
 
 
+def parse_datetime(value):
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=TZ)
+    return dt
+
+
 @lru_cache(maxsize=1)
 def load_ledger():
     if not LEDGER_URL:
@@ -26,16 +33,16 @@ def load_ledger():
 
     session = requests.Session()
 
-    root = session.get(LEDGER_URL, timeout=TIMEOUT)
-    root.raise_for_status()
-    api = root.json()
+    root_response = session.get(LEDGER_URL, timeout=TIMEOUT)
+    root_response.raise_for_status()
+    api = root_response.json()
 
     rates_response = session.get(api["links"]["rates"], timeout=TIMEOUT)
     rates_response.raise_for_status()
     rates = rates_response.json()["usd_per_unit"]
 
-    url = api["links"]["orders"]
     latest = {}
+    url = api["links"]["orders"]
 
     while url:
         response = session.get(url, timeout=TIMEOUT)
@@ -46,19 +53,12 @@ def load_ledger():
             oid = order["id"]
             old = latest.get(oid)
 
-            old = latest.get(oid)
-
             if old is None:
                 latest[oid] = order
             else:
-                new_updated = datetime.fromisoformat(
-                    order["updated_at"].replace("Z", "+00:00")
-                )
-                old_updated = datetime.fromisoformat(
-                    old["updated_at"].replace("Z", "+00:00")
-                )
-
-                if new_updated > old_updated:
+                if parse_datetime(order["updated_at"]) > parse_datetime(
+                    old["updated_at"]
+                ):
                     latest[oid] = order
 
         url = page.get("next")
@@ -67,25 +67,22 @@ def load_ledger():
 
 
 def date_of(order):
-    dt = datetime.fromisoformat(order["created_at"])
-
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=TZ)
-
-    return dt.astimezone(TZ)
+    return parse_datetime(order["created_at"]).astimezone(TZ)
 
 
 def usd(order, rates):
-    return (
-        float(order.get("amount", 0))
-        * float(rates.get(order.get("currency", "USD"), 1))
-    )
+    currency = order.get("currency", "USD").upper()
+    value = float(order.get("amount", 0))
+
+    # Rates are USD per one unit of the listed currency.
+    return value * float(rates.get(currency, 1))
 
 
 def answer(question):
     orders, rates = load_ledger()
     q = question.lower()
 
+    # Identify optional filters.
     region = next(
         (
             r for r in ["north", "south", "east", "west", "central"]
@@ -94,176 +91,166 @@ def answer(question):
         None,
     )
 
-    product = next(
-        (
-            p for p in sorted(
-                {o.get("product", "") for o in orders},
-                key=len,
-                reverse=True,
-            )
-            if p and p.lower() in q
-        ),
-        None,
+    products = sorted(
+        {o.get("product", "") for o in orders if o.get("product")},
+        key=len,
+        reverse=True,
     )
+    product = next((p for p in products if p.lower() in q), None)
 
-    customer = re.search(r"\bc\d{4}\b", q, re.I)
+    customer_match = re.search(r"\bc\d{4}\b", q, re.I)
 
     month_match = re.search(
         r"\b(january|february|march|april|may|june|july|august|"
         r"september|october|november|december)\s+(20\d{2})\b",
         q,
     )
-
     month_nums = {
-        "january": 1,
-        "february": 2,
-        "march": 3,
-        "april": 4,
-        "may": 5,
-        "june": 6,
-        "july": 7,
-        "august": 8,
-        "september": 9,
-        "october": 10,
-        "november": 11,
-        "december": 12,
+        "january": 1, "february": 2, "march": 3, "april": 4,
+        "may": 5, "june": 6, "july": 7, "august": 8,
+        "september": 9, "october": 10, "november": 11, "december": 12,
     }
-
-    ym = (
+    year_month = (
         (int(month_match.group(2)), month_nums[month_match.group(1)])
-        if month_match
-        else None
+        if month_match else None
     )
 
     filtered = []
 
-    for o in orders:
-        d = date_of(o)
+    for order in orders:
+        dt = date_of(order)
 
-        if region and o.get("region", "").lower() != region:
+        if region and order.get("region", "").lower() != region:
             continue
 
-        if product and o.get("product", "").lower() != product.lower():
+        if product and order.get("product", "").lower() != product.lower():
             continue
 
-        if customer and o.get("customer", "").lower() != customer.group().lower():
+        if customer_match and order.get("customer", "").lower() != (
+            customer_match.group().lower()
+        ):
             continue
 
-        if ym and (d.year, d.month) != ym:
+        if year_month and (dt.year, dt.month) != year_month:
             continue
 
-        filtered.append(o)
+        filtered.append(order)
 
     if not filtered:
         return "No matching orders were found."
 
+    paid = [o for o in filtered if o.get("status", "").lower() == "paid"]
+    refunded = [
+        o for o in filtered if o.get("status", "").lower() == "refunded"
+    ]
+
     currency_match = re.search(r"\b(usd|eur|inr)\b", q)
     currency = currency_match.group(1).upper() if currency_match else "USD"
 
-    def amount(o):
-        if currency == "USD":
-            return usd(o, rates)
+    def converted_amount(order):
+        value = float(order.get("amount", 0))
+        original_currency = order.get("currency", "USD").upper()
 
-        if o.get("currency") == currency:
-            return float(o.get("amount", 0))
+        if original_currency == currency:
+            return value
 
-        return usd(o, rates) / float(rates.get(currency, 1))
+        usd_value = usd(order, rates)
+        return usd_value / float(rates.get(currency, 1))
 
-    # Count distinct customers who have at least one paid order.
-        # Distinct customers for paid orders, including "paid orders only".
-    if "customer" in q and any(
-        phrase in q
-        for phrase in [
-            "distinct",
-            "different",
-            "unique",
-        ]
+    # Distinct customers with paid orders.
+    if (
+        "customer" in q
+        and any(word in q for word in ["distinct", "different", "unique"])
     ):
-        rows = [
-            o for o in filtered
-            if o.get("status", "").lower() == "paid"
-        ]
-
         customers = {
             o.get("customer")
-            for o in rows
+            for o in paid
             if o.get("customer")
         }
-
         return str(len(customers))
 
-    # Refunds
-    if any(w in q for w in ["refund", "refunded"]):
-        rows = [
-            o for o in filtered
-            if o.get("status") == "refunded"
-        ]
+    # Top-selling product by revenue must be checked before general revenue.
+    revenue_ranking = (
+        "top-selling product" in q
+        or "top selling product" in q
+        or "best-selling product by revenue" in q
+        or "best selling product by revenue" in q
+        or "highest revenue product" in q
+        or "product by revenue" in q
+        or "most revenue" in q
+        or ("top" in q and "product" in q and "revenue" in q)
+    )
 
-        total = sum(amount(o) for o in rows)
-
-        return (
-            f"Refunded orders: {len(rows)}; "
-            f"refund amount: {total:,.2f} {currency}."
-        )
-
-    # Revenue: only paid orders count.
-    if any(w in q for w in ["revenue", "sales", "earned", "income"]):
-        rows = [
-            o for o in filtered
-            if o.get("status") == "paid"
-        ]
-
-        total = sum(amount(o) for o in rows)
-
-        return (
-            f"Total revenue: {total:,.2f} {currency} "
-            f"from {len(rows)} paid orders."
-        )
-
-    # Best-selling product by quantity
-    if any(
-        w in q
-        for w in [
-            "top product",
-            "best-selling product",
-            "most popular product",
-        ]
-    ):
+    if revenue_ranking:
         totals = {}
 
-        for o in filtered:
-            if o.get("status") == "paid":
-                p = o.get("product", "Unknown")
-                totals[p] = totals.get(p, 0) + int(o.get("qty", 0))
+        for order in paid:
+            name = order.get("product", "Unknown")
+            totals[name] = totals.get(name, 0) + usd(order, rates)
 
         if not totals:
             return "No paid orders matched."
 
-        p, qty = max(totals.items(), key=lambda x: x[1])
+        best_product = max(totals, key=totals.get)
+        return best_product
 
-        return f"Best-selling product by quantity: {p} ({qty} units)."
+    # Top-selling product by quantity.
+    quantity_ranking = (
+        "best-selling product" in q
+        or "best selling product" in q
+        or "most popular product" in q
+        or "top product" in q
+        or "most units" in q
+    )
 
-    # Customer-specific details
-    if customer:
-        rows = [
-            o for o in filtered
-            if o.get("status") == "paid"
-        ]
+    if quantity_ranking:
+        totals = {}
+
+        for order in paid:
+            name = order.get("product", "Unknown")
+            totals[name] = totals.get(name, 0) + int(order.get("qty", 0))
+
+        if not totals:
+            return "No paid orders matched."
+
+        best_product = max(totals, key=totals.get)
+        return best_product
+
+    # Refund totals.
+    if "refund" in q or "refunded" in q:
+        total = sum(converted_amount(o) for o in refunded)
 
         return (
-            f"Customer {customer.group().upper()}: "
-            f"{len(filtered)} matching orders; "
-            f"paid revenue {sum(usd(o, rates) for o in rows):,.2f} USD."
+            f"Refunded orders: {len(refunded)}; "
+            f"refund amount: {total:.2f} {currency}."
         )
 
-    # Generic order count
-    if any(w in q for w in ["how many", "number of", "count", "orders"]):
-        return f"Matching orders: {len(filtered)}."
+    # General revenue: only paid orders count.
+    if any(word in q for word in ["revenue", "sales", "earned", "income"]):
+        total = sum(converted_amount(o) for o in paid)
+
+        return (
+            f"Total revenue: {total:.2f} {currency} "
+            f"from {len(paid)} paid orders."
+        )
+
+    # Customer-specific summary.
+    if customer_match:
+        customer_id = customer_match.group().upper()
+        total = sum(usd(o, rates) for o in paid)
+
+        return (
+            f"Customer {customer_id}: {len(filtered)} matching orders; "
+            f"paid revenue {total:.2f} USD."
+        )
+
+    # Order counts.
+    if any(word in q for word in ["how many", "number of", "count", "orders"]):
+        return str(len(filtered))
 
     return (
         f"Found {len(filtered)} matching orders. "
-        "Ask specifically about revenue, refunds, order count, "
-        "or best-selling product."
+        "Ask about revenue, refunds, customer counts, or best-selling products."
     )
 
 
@@ -291,22 +278,5 @@ def ask(data: Question):
     except HTTPException:
         raise
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-@app.get("/debug")
-def debug():
-    orders, rates = load_ledger()
-
-    south_june = [
-        o for o in orders
-        if o.get("region", "").lower() == "south"
-        and date_of(o).year == 2026
-        and date_of(o).month == 6
-    ]
-
-    return {
-        "total_orders": len(orders),
-        "sample_order": orders[0] if orders else None,
-        "south_june_count": len(south_june),
-        "south_june_sample": south_june[:3],
-    }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
