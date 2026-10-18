@@ -170,13 +170,18 @@ def answer(question):
         return usd(o, rates) / float(rates.get(currency, 1))
 
     # Count distinct customers who have at least one paid order.
-    if (
-        ("different customers" in q or "distinct customers" in q)
-        and "paid" in q
+        # Distinct customers for paid orders, including "paid orders only".
+    if "customer" in q and any(
+        phrase in q
+        for phrase in [
+            "distinct",
+            "different",
+            "unique",
+        ]
     ):
         rows = [
             o for o in filtered
-            if o.get("status") == "paid"
+            if o.get("status", "").lower() == "paid"
         ]
 
         customers = {
@@ -185,7 +190,7 @@ def answer(question):
             if o.get("customer")
         }
 
-        return f"Different customers: {len(customers)}."
+        return str(len(customers))
 
     # Refunds
     if any(w in q for w in ["refund", "refunded"]):
