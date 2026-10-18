@@ -46,8 +46,20 @@ def load_ledger():
             oid = order["id"]
             old = latest.get(oid)
 
-            if old is None or order["updated_at"] > old["updated_at"]:
+            old = latest.get(oid)
+
+            if old is None:
                 latest[oid] = order
+            else:
+                new_updated = datetime.fromisoformat(
+                    order["updated_at"].replace("Z", "+00:00")
+                )
+                old_updated = datetime.fromisoformat(
+                    old["updated_at"].replace("Z", "+00:00")
+                )
+
+                if new_updated > old_updated:
+                    latest[oid] = order
 
         url = page.get("next")
 
