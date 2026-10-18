@@ -36,6 +36,7 @@ def load_ledger():
     root_response = session.get(LEDGER_URL, timeout=TIMEOUT)
     root_response.raise_for_status()
     api = root_response.json()
+    print("LEDGER LINKS:", api.get("links"))
 
     rates_response = session.get(api["links"]["rates"], timeout=TIMEOUT)
     rates_response.raise_for_status()
